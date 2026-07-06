@@ -11,6 +11,11 @@ from datetime import datetime, timedelta
 
 DB_PATH = os.getenv("DB_PATH", "voenbilet.db")
 
+# Папка для скачанных скриншотов — лежит на том же общем томе (Azure File
+# Share), что и база данных, чтобы оба бота видели одни и те же файлы.
+PHOTOS_DIR = os.getenv("PHOTOS_DIR", os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "photos"))
+os.makedirs(PHOTOS_DIR, exist_ok=True)
+
 # Кулдаун между заявками одного пользователя (в часах)
 COOLDOWN_HOURS = int(os.getenv("COOLDOWN_HOURS", "2"))
 
@@ -144,6 +149,15 @@ def get_application(app_id: int):
 
 
 def delete_application(app_id: int):
+    app = get_application(app_id)
+    if app:
+        for key in ("reg_screenshot", "promo_screenshot", "medcard_screenshot", "license_screenshot"):
+            path = app[key]
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
     conn = db_connect()
     conn.execute("DELETE FROM applications WHERE id = ?", (app_id,))
     conn.commit()
