@@ -75,6 +75,20 @@ def format_hms(td) -> str:
     return f"{hours} ч {minutes} мин"
 
 
+async def save_photo(context: ContextTypes.DEFAULT_TYPE, photo, prefix: str) -> str:
+    """
+    Скачивает фото на диск (в общую папку на Azure File Share) и возвращает
+    путь к файлу. Так фото сможет позже открыть и переслать ДРУГОЙ бот
+    (admin_bot) — обычный file_id для этого не годится, он привязан к
+    тому боту, который изначально получил фото.
+    """
+    file = await context.bot.get_file(photo.file_id)
+    filename = f"{prefix}_{photo.file_unique_id}.jpg"
+    path = os.path.join(db.PHOTOS_DIR, filename)
+    await file.download_to_drive(path)
+    return path
+
+
 async def blocked_guard(update: Update) -> bool:
     user_id = update.effective_user.id
     if db.is_blocked(user_id):
@@ -145,7 +159,9 @@ async def reg_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Нужен именно скриншот (фото). Отправьте скрин ника при регистрации."
         )
         return REG_SCREENSHOT
-    context.user_data["reg_screenshot"] = update.message.photo[-1].file_id
+    context.user_data["reg_screenshot"] = await save_photo(
+        context, update.message.photo[-1], f"{update.effective_user.id}_reg"
+    )
     await update.message.reply_text("Отправьте скриншот введённого промокода sueta.")
     return PROMO_SCREENSHOT
 
@@ -158,7 +174,9 @@ async def promo_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Нужен именно скриншот (фото). Отправьте скрин промокода sueta."
         )
         return PROMO_SCREENSHOT
-    context.user_data["promo_screenshot"] = update.message.photo[-1].file_id
+    context.user_data["promo_screenshot"] = await save_photo(
+        context, update.message.photo[-1], f"{update.effective_user.id}_promo"
+    )
     await update.message.reply_text("Отправьте скриншот мед. карты.")
     return MEDCARD_SCREENSHOT
 
@@ -171,7 +189,9 @@ async def medcard_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "Нужен именно скриншот (фото). Отправьте скрин мед. карты."
         )
         return MEDCARD_SCREENSHOT
-    context.user_data["medcard_screenshot"] = update.message.photo[-1].file_id
+    context.user_data["medcard_screenshot"] = await save_photo(
+        context, update.message.photo[-1], f"{update.effective_user.id}_medcard"
+    )
     await update.message.reply_text(
         "Введите ваш никнейм строго по форме, например: Tema_Pupok"
     )
@@ -202,7 +222,9 @@ async def license_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return LICENSE_SCREENSHOT
 
-    context.user_data["license_screenshot"] = update.message.photo[-1].file_id
+    context.user_data["license_screenshot"] = await save_photo(
+        context, update.message.photo[-1], f"{update.effective_user.id}_license"
+    )
 
     user = update.effective_user
     data = {
@@ -257,7 +279,7 @@ async def notify_admin_bot(app_id: int):
     if not app:
         return
 
-    photos = [
+    photo_paths = [
         app["reg_screenshot"],
         app["promo_screenshot"],
         app["medcard_screenshot"],
@@ -284,8 +306,9 @@ async def notify_admin_bot(app_id: int):
     for admin_id in ADMIN_IDS:
         try:
             await admin_bot.send_message(chat_id=admin_id, text=app["nickname"])
-            for file_id in photos:
-                await admin_bot.send_photo(chat_id=admin_id, photo=file_id)
+            for path in photo_paths:
+                with open(path, "rb") as photo_file:
+                    await admin_bot.send_photo(chat_id=admin_id, photo=photo_file)
             await admin_bot.send_message(
                 chat_id=admin_id, text="Действия с заявкой:", reply_markup=keyboard
             )
