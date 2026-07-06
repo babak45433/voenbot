@@ -98,14 +98,15 @@ async def view_application(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(chat_id=query.message.chat_id, text=app["nickname"])
 
-    photos = [
+    photo_paths = [
         app["reg_screenshot"],
         app["promo_screenshot"],
         app["medcard_screenshot"],
         app["license_screenshot"],
     ]
-    for file_id in photos:
-        await context.bot.send_photo(chat_id=query.message.chat_id, photo=file_id)
+    for path in photo_paths:
+        with open(path, "rb") as photo_file:
+            await context.bot.send_photo(chat_id=query.message.chat_id, photo=photo_file)
 
     keyboard = InlineKeyboardMarkup(
         [
