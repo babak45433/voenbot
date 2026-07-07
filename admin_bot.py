@@ -35,6 +35,9 @@ import db
 
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "ВСТАВЬТЕ_СЮДА_ТОКЕН_АДМИН_БОТА")
 
+TWITCH_CHANNEL = "ellingtontv"
+TWITCH_URL = f"https://twitch.tv/{TWITCH_CHANNEL}"
+
 # Токен пользовательского бота — нужен ТОЛЬКО чтобы уведомить пользователя
 # об одобрении/отклонении заявки. Полноценный polling для него не запускаем.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -291,7 +294,11 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"✅ Заявка №{app_id} одобрена.")
     await notify_user(
         app["user_id"],
-        f"✅ Ваша заявка №{app_id} одобрена! Ждите военный билет согласно инструкции.",
+        f"✅ Ваша заявка №{app_id} одобрена!\n\n"
+        f"Теперь дождитесь начала стрима на Twitch: {TWITCH_URL}\n"
+        f"Как только стрим начнётся, заходите в чат и напишите: "
+        f"«Я за военником, моя заявка №{app_id}».\n"
+        f"После этого ожидайте выдачу. В этот момент вы должны находиться на сервере.",
     )
 
 
