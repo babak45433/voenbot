@@ -4,10 +4,15 @@
 
 Функции:
 - Получает уведомления о новых заявках (их отправляет user_bot.py через
-  этот же токен).
+  этот же токен), скрины приходят одной "кучкой" (media group).
 - /voennik — список заявок, ожидающих проверки.
-- Просмотр заявки: никнейм + все скрины.
-- Кнопка "Удалить (проверено)" — удаляет заявку из базы.
+- /approved — список одобренных заявок.
+- /rejected — список отклонённых заявок.
+- /find <ник или номер> — поиск заявки.
+- /blocklist — список заблокированных пользователей.
+- Просмотр заявки: никнейм + все скрины одной кучкой.
+- Кнопки "Одобрить" / "Отклонить" — меняют статус и уведомляют пользователя
+  (через BOT_TOKEN — токен пользовательского бота).
 - Кнопка "Заблокировать пользователя" — блокирует автора заявки.
 - /block <user_id> и /unblock <user_id> — ручная блокировка по ID.
 
@@ -18,7 +23,7 @@
 import logging
 import os
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -29,6 +34,10 @@ from telegram.ext import (
 import db
 
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "ВСТАВЬТЕ_СЮДА_ТОКЕН_АДМИН_БОТА")
+
+# Токен пользовательского бота — нужен ТОЛЬКО чтобы уведомить пользователя
+# об одобрении/отклонении заявки. Полноценный polling для него не запускаем.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 _admin_ids_env = os.getenv("ADMIN_IDS")
 if _admin_ids_env:
@@ -47,27 +56,107 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+async def notify_user(user_id: int, text: str):
+    """Уведомляет заявителя через бота пользователей (BOT_TOKEN)."""
+    if not BOT_TOKEN:
+        logger.warning("BOT_TOKEN не задан — не могу уведомить пользователя %s", user_id)
+        return
+    try:
+        applicant_bot = Bot(token=BOT_TOKEN)
+        await applicant_bot.send_message(chat_id=user_id, text=text)
+    except Exception as e:
+        logger.warning("Не удалось уведомить пользователя %s: %s", user_id, e)
+
+
+async def send_application_card(chat_id: int, context: ContextTypes.DEFAULT_TYPE, app):
+    """Отправляет никнейм + скрины кучкой (media group) + кнопки действий."""
+    await context.bot.send_message(
+        chat_id=chat_id, text=f"📋 Заявка №{app['id']} ({app['status']})\n{app['nickname']}"
+    )
+
+    photo_paths = [
+        app["reg_screenshot"],
+        app["promo_screenshot"],
+        app["medcard_screenshot"],
+        app["license_screenshot"],
+    ]
+    opened_files = []
+    media = []
+    for path in photo_paths:
+        if path and os.path.isfile(path):
+            f = open(path, "rb")
+            opened_files.append(f)
+            media.append(InputMediaPhoto(f))
+    if media:
+        try:
+            await context.bot.send_media_group(chat_id=chat_id, media=media)
+        finally:
+            for f in opened_files:
+                f.close()
+
+    if app["status"] == "pending":
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{app['id']}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{app['id']}"),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🚫 Заблокировать пользователя",
+                        callback_data=f"blockuser_{app['user_id']}",
+                    )
+                ],
+            ]
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🗑 Удалить окончательно", callback_data=f"delete_{app['id']}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🚫 Заблокировать пользователя",
+                        callback_data=f"blockuser_{app['user_id']}",
+                    )
+                ],
+            ]
+        )
+    await context.bot.send_message(
+        chat_id=chat_id, text="Действия с заявкой:", reply_markup=keyboard
+    )
+
+
+# --------------------------------------------------------------------------
+# КОМАНДЫ
+# --------------------------------------------------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("У вас нет доступа к этому боту.")
         return
     await update.message.reply_text(
         "Админ-панель.\n"
-        "/voennik — список заявок на проверку\n"
+        "/voennik — заявки на проверку\n"
+        "/approved — одобренные заявки\n"
+        "/rejected — отклонённые заявки\n"
+        "/find <ник или номер> — найти заявку\n"
+        "/blocklist — список заблокированных\n"
         "/block <user_id> — заблокировать пользователя\n"
         "/unblock <user_id> — разблокировать пользователя"
     )
 
 
-async def voennik_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_status_list(update: Update, status: str, title: str):
     if not is_admin(update.effective_user.id):
         return
-
-    applications = db.get_pending_applications()
+    applications = db.get_applications_by_status(status)
     if not applications:
-        await update.message.reply_text("Заявок на проверку нет.")
+        await update.message.reply_text(f"{title}: пусто.")
         return
-
     buttons = [
         [
             InlineKeyboardButton(
@@ -78,80 +167,63 @@ async def voennik_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for app in applications
     ]
     await update.message.reply_text(
-        f"Заявок на проверку: {len(applications)}",
+        f"{title}: {len(applications)}",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
-async def view_application(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def voennik_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _send_status_list(update, "pending", "Заявок на проверку")
 
+
+async def approved_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _send_status_list(update, "approved", "Одобренные заявки")
+
+
+async def rejected_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _send_status_list(update, "rejected", "Отклонённые заявки")
+
+
+async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-
-    app_id = int(query.data.split("_")[1])
-    app = db.get_application(app_id)
-    if not app:
-        await query.edit_message_text("Заявка не найдена (возможно, уже удалена).")
+    if not context.args:
+        await update.message.reply_text(
+            "Использование: /find <номер заявки или никнейм>\n"
+            "Например: /find 42  или  /find Tema_Pupok"
+        )
         return
-
-    await context.bot.send_message(chat_id=query.message.chat_id, text=app["nickname"])
-
-    photo_paths = [
-        app["reg_screenshot"],
-        app["promo_screenshot"],
-        app["medcard_screenshot"],
-        app["license_screenshot"],
-    ]
-    for path in photo_paths:
-        with open(path, "rb") as photo_file:
-            await context.bot.send_photo(chat_id=query.message.chat_id, photo=photo_file)
-
-    keyboard = InlineKeyboardMarkup(
+    query = " ".join(context.args)
+    results = db.search_applications(query)
+    if not results:
+        await update.message.reply_text("Ничего не найдено.")
+        return
+    if len(results) == 1:
+        await send_application_card(update.effective_chat.id, context, results[0])
+        return
+    buttons = [
         [
-            [
-                InlineKeyboardButton(
-                    "🗑 Удалить (проверено)", callback_data=f"delete_{app_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🚫 Заблокировать пользователя",
-                    callback_data=f"blockuser_{app['user_id']}",
-                )
-            ],
+            InlineKeyboardButton(
+                f"№{app['id']} — {app['nickname']} ({app['status']})",
+                callback_data=f"view_{app['id']}",
+            )
         ]
+        for app in results
+    ]
+    await update.message.reply_text(
+        f"Найдено: {len(results)}", reply_markup=InlineKeyboardMarkup(buttons)
     )
-    await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text="Действия с заявкой:",
-        reply_markup=keyboard,
-    )
 
 
-async def delete_application_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
+async def blocklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-
-    app_id = int(query.data.split("_")[1])
-    db.delete_application(app_id)
-    await query.edit_message_text(f"✅ Заявка №{app_id} удалена (отмечена как прочитанная).")
-
-
-async def block_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(update.effective_user.id):
+    blocked = db.get_blocked_users()
+    if not blocked:
+        await update.message.reply_text("Заблокированных пользователей нет.")
         return
-
-    target_user_id = int(query.data.split("_")[1])
-    db.block_user_db(target_user_id)
-    await query.edit_message_text(f"🚫 Пользователь {target_user_id} заблокирован.")
+    lines = "\n".join(f"• {uid}" for uid in blocked)
+    await update.message.reply_text(f"🚫 Заблокированные пользователи:\n{lines}")
 
 
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,15 +256,103 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Пользователь {target_id} разблокирован.")
 
 
+# --------------------------------------------------------------------------
+# CALLBACK-КНОПКИ
+# --------------------------------------------------------------------------
+
+async def view_application(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+
+    app_id = int(query.data.split("_")[1])
+    app = db.get_application(app_id)
+    if not app:
+        await query.edit_message_text("Заявка не найдена (возможно, уже удалена).")
+        return
+
+    await send_application_card(query.message.chat_id, context, app)
+
+
+async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+
+    app_id = int(query.data.split("_")[1])
+    app = db.get_application(app_id)
+    if not app:
+        await query.edit_message_text("Заявка не найдена.")
+        return
+
+    db.approve_application(app_id)
+    await query.edit_message_text(f"✅ Заявка №{app_id} одобрена.")
+    await notify_user(
+        app["user_id"],
+        f"✅ Ваша заявка №{app_id} одобрена! Ждите военный билет согласно инструкции.",
+    )
+
+
+async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+
+    app_id = int(query.data.split("_")[1])
+    app = db.get_application(app_id)
+    if not app:
+        await query.edit_message_text("Заявка не найдена.")
+        return
+
+    db.reject_application(app_id)
+    await query.edit_message_text(f"❌ Заявка №{app_id} отклонена.")
+    await notify_user(
+        app["user_id"],
+        f"❌ Ваша заявка №{app_id} отклонена. Проверьте правильность скринов и "
+        f"попробуйте подать заявку заново через /start.",
+    )
+
+
+async def delete_application_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+
+    app_id = int(query.data.split("_")[1])
+    db.delete_application(app_id)
+    await query.edit_message_text(f"🗑 Заявка №{app_id} удалена окончательно.")
+
+
+async def block_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+
+    target_user_id = int(query.data.split("_")[1])
+    db.block_user_db(target_user_id)
+    await query.edit_message_text(f"🚫 Пользователь {target_user_id} заблокирован.")
+
+
 def main():
     db.init_db()
     application = Application.builder().token(ADMIN_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("voennik", voennik_command))
+    application.add_handler(CommandHandler("approved", approved_command))
+    application.add_handler(CommandHandler("rejected", rejected_command))
+    application.add_handler(CommandHandler("find", find_command))
+    application.add_handler(CommandHandler("blocklist", blocklist_command))
     application.add_handler(CommandHandler("block", block_command))
     application.add_handler(CommandHandler("unblock", unblock_command))
     application.add_handler(CallbackQueryHandler(view_application, pattern="^view_"))
+    application.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
+    application.add_handler(CallbackQueryHandler(reject_callback, pattern="^reject_"))
     application.add_handler(CallbackQueryHandler(delete_application_callback, pattern="^delete_"))
     application.add_handler(CallbackQueryHandler(block_user_callback, pattern="^blockuser_"))
 
