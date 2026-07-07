@@ -6,6 +6,7 @@
 """
 
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -18,6 +19,8 @@ os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 # Кулдаун между заявками одного пользователя (в часах)
 COOLDOWN_HOURS = int(os.getenv("COOLDOWN_HOURS", "2"))
+
+NICKNAME_PATTERN = re.compile(r"^[A-ZА-ЯЁ][a-zа-яё]+_[A-ZА-ЯЁ][a-zа-яё]+$")
 
 
 def db_connect():
@@ -81,8 +84,18 @@ def unblock_user_db(user_id: int):
     conn.close()
 
 
+def get_blocked_users():
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT user_id FROM blocked_users ORDER BY user_id ASC"
+    ).fetchall()
+    conn.close()
+    return [row["user_id"] for row in rows]
+
+
 def get_cooldown_remaining(user_id: int):
-    """Возвращает timedelta до конца кулдауна, либо None если можно начинать."""
+    """Возвращает timedelta до конца кулдауна, либо None если можно начинать.
+    Учитываются только ЗАВЕРШЁННЫЕ заявки (то есть уже сохранённые в базу)."""
     conn = db_connect()
     row = conn.execute(
         """
@@ -130,13 +143,17 @@ def save_application(data: dict) -> int:
     return app_id
 
 
-def get_pending_applications():
+def get_applications_by_status(status: str):
     conn = db_connect()
     rows = conn.execute(
-        "SELECT * FROM applications WHERE status = 'pending' ORDER BY id ASC"
+        "SELECT * FROM applications WHERE status = ? ORDER BY id ASC", (status,)
     ).fetchall()
     conn.close()
     return rows
+
+
+def get_pending_applications():
+    return get_applications_by_status("pending")
 
 
 def get_application(app_id: int):
@@ -148,7 +165,44 @@ def get_application(app_id: int):
     return row
 
 
+def set_application_status(app_id: int, status: str):
+    conn = db_connect()
+    conn.execute("UPDATE applications SET status = ? WHERE id = ?", (status, app_id))
+    conn.commit()
+    conn.close()
+
+
+def approve_application(app_id: int):
+    set_application_status(app_id, "approved")
+
+
+def reject_application(app_id: int):
+    set_application_status(app_id, "rejected")
+
+
+def search_applications(query: str):
+    """
+    Если query состоит из цифр — ищет по номеру заявки (id).
+    Если query похож на никнейм формата Слово_Слово — ищет по никнейму.
+    Возвращает список найденных заявок (может быть пустым).
+    """
+    query = query.strip()
+    conn = db_connect()
+    if query.isdigit():
+        rows = conn.execute(
+            "SELECT * FROM applications WHERE id = ?", (int(query),)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM applications WHERE nickname = ? COLLATE NOCASE ORDER BY id DESC",
+            (query,),
+        ).fetchall()
+    conn.close()
+    return rows
+
+
 def delete_application(app_id: int):
+    """Полностью удаляет заявку и её файлы-скрины с диска."""
     app = get_application(app_id)
     if app:
         for key in ("reg_screenshot", "promo_screenshot", "medcard_screenshot", "license_screenshot"):
