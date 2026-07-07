@@ -73,8 +73,8 @@ TWITCH_URL = f"https://twitch.tv/{TWITCH_CHANNEL}"
 # Примеры скринов — показываются рядом с каждым запросом.
 EXAMPLE_REG = "https://ibb.co/FpGr32H"
 EXAMPLE_PROMO = "https://ibb.co/cS2t9bc5"
-EXAMPLE_MEDCARD = "https://ibb.co/n8VPF4Gv"
-EXAMPLE_LICENSE = "https://ibb.co/gMCZ3gvF"
+EXAMPLE_MEDCARD = "https://ibb.co/JjGp4nVq"
+EXAMPLE_LICENSE = "https://ibb.co/qYZDcbGg"
 
 STEP_TOTAL = 5
 BACK_BUTTON_TEXT = "◀️ Назад"
