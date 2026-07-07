@@ -23,7 +23,16 @@
 import logging
 import os
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import (
+    Bot,
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -53,6 +62,33 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# Подсказки команд (появляются, когда админ вводит "/" в чате с ботом)
+ADMIN_COMMANDS = [
+    BotCommand("voennik", "Заявки на проверку"),
+    BotCommand("approved", "Одобренные заявки"),
+    BotCommand("rejected", "Отклонённые заявки"),
+    BotCommand("find", "Найти заявку по нику/номеру"),
+    BotCommand("blocklist", "Список заблокированных"),
+    BotCommand("block", "Заблокировать пользователя"),
+    BotCommand("unblock", "Разблокировать пользователя"),
+]
+
+# Постоянные кнопки снизу с тремя самыми частыми командами
+ADMIN_MENU_MARKUP = ReplyKeyboardMarkup(
+    [["/voennik", "/approved", "/rejected"]], resize_keyboard=True
+)
+
+
+async def post_init(application: Application):
+    """Задаёт подсказки команд отдельно для каждого админа (не для всех подряд)."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await application.bot.set_my_commands(
+                ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception as e:
+            logger.warning("Не удалось задать команды для админа %s: %s", admin_id, e)
 
 
 def is_admin(user_id: int) -> bool:
@@ -149,7 +185,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/find <ник или номер> — найти заявку\n"
         "/blocklist — список заблокированных\n"
         "/block <user_id> — заблокировать пользователя\n"
-        "/unblock <user_id> — разблокировать пользователя"
+        "/unblock <user_id> — разблокировать пользователя",
+        reply_markup=ADMIN_MENU_MARKUP,
     )
 
 
@@ -158,7 +195,7 @@ async def _send_status_list(update: Update, status: str, title: str):
         return
     applications = db.get_applications_by_status(status)
     if not applications:
-        await update.message.reply_text(f"{title}: пусто.")
+        await update.message.reply_text(f"{title}: пусто.", reply_markup=ADMIN_MENU_MARKUP)
         return
     buttons = [
         [
@@ -193,13 +230,14 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Использование: /find <номер заявки или никнейм>\n"
-            "Например: /find 42  или  /find Tema_Pupok"
+            "Например: /find 42  или  /find Tema_Pupok",
+            reply_markup=ADMIN_MENU_MARKUP,
         )
         return
     query = " ".join(context.args)
     results = db.search_applications(query)
     if not results:
-        await update.message.reply_text("Ничего не найдено.")
+        await update.message.reply_text("Ничего не найдено.", reply_markup=ADMIN_MENU_MARKUP)
         return
     if len(results) == 1:
         await send_application_card(update.effective_chat.id, context, results[0])
@@ -223,17 +261,23 @@ async def blocklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     blocked = db.get_blocked_users()
     if not blocked:
-        await update.message.reply_text("Заблокированных пользователей нет.")
+        await update.message.reply_text(
+            "Заблокированных пользователей нет.", reply_markup=ADMIN_MENU_MARKUP
+        )
         return
     lines = "\n".join(f"• {uid}" for uid in blocked)
-    await update.message.reply_text(f"🚫 Заблокированные пользователи:\n{lines}")
+    await update.message.reply_text(
+        f"🚫 Заблокированные пользователи:\n{lines}", reply_markup=ADMIN_MENU_MARKUP
+    )
 
 
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("Использование: /block <user_id>")
+        await update.message.reply_text(
+            "Использование: /block <user_id>", reply_markup=ADMIN_MENU_MARKUP
+        )
         return
     try:
         target_id = int(context.args[0])
@@ -241,14 +285,18 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("user_id должен быть числом.")
         return
     db.block_user_db(target_id)
-    await update.message.reply_text(f"🚫 Пользователь {target_id} заблокирован.")
+    await update.message.reply_text(
+        f"🚫 Пользователь {target_id} заблокирован.", reply_markup=ADMIN_MENU_MARKUP
+    )
 
 
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("Использование: /unblock <user_id>")
+        await update.message.reply_text(
+            "Использование: /unblock <user_id>", reply_markup=ADMIN_MENU_MARKUP
+        )
         return
     try:
         target_id = int(context.args[0])
@@ -256,7 +304,9 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("user_id должен быть числом.")
         return
     db.unblock_user_db(target_id)
-    await update.message.reply_text(f"✅ Пользователь {target_id} разблокирован.")
+    await update.message.reply_text(
+        f"✅ Пользователь {target_id} разблокирован.", reply_markup=ADMIN_MENU_MARKUP
+    )
 
 
 # --------------------------------------------------------------------------
@@ -347,7 +397,7 @@ async def block_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def main():
     db.init_db()
-    application = Application.builder().token(ADMIN_BOT_TOKEN).build()
+    application = Application.builder().token(ADMIN_BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("voennik", voennik_command))
