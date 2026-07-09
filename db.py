@@ -44,10 +44,16 @@ def init_db():
             medcard_screenshot TEXT,
             license_screenshot TEXT,
             status TEXT DEFAULT 'pending',
+            issued INTEGER DEFAULT 0,
             created_at TEXT
         )
         """
     )
+    # Миграция для БД, созданных до появления поля issued
+    try:
+        cur.execute("ALTER TABLE applications ADD COLUMN issued INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # колонка уже существует
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS blocked_users (
@@ -178,6 +184,20 @@ def approve_application(app_id: int):
 
 def reject_application(app_id: int):
     set_application_status(app_id, "rejected")
+
+
+def toggle_issued(app_id: int) -> bool:
+    """Переключает флаг 'выдан военный билет'. Возвращает новое значение."""
+    conn = db_connect()
+    row = conn.execute("SELECT issued FROM applications WHERE id = ?", (app_id,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    new_value = 0 if row["issued"] else 1
+    conn.execute("UPDATE applications SET issued = ? WHERE id = ?", (new_value, app_id))
+    conn.commit()
+    conn.close()
+    return bool(new_value)
 
 
 def search_applications(query: str):
