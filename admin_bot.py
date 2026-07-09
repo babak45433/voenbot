@@ -74,9 +74,9 @@ ADMIN_COMMANDS = [
     BotCommand("unblock", "Разблокировать пользователя"),
 ]
 
-# Постоянные кнопки снизу с тремя самыми частыми командами
+# Постоянные кнопки снизу с самыми частыми командами
 ADMIN_MENU_MARKUP = ReplyKeyboardMarkup(
-    [["/voennik", "/approved", "/rejected"]], resize_keyboard=True
+    [["/voennik", "/approved", "/rejected"], ["/find"]], resize_keyboard=True
 )
 
 
@@ -112,9 +112,10 @@ async def send_application_card(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     issued_note = ""
     if app["status"] == "approved":
         issued_note = "\n🎖 Военник выдан" if app["issued"] else "\n⬜ Военник ещё не выдан"
+    username_line = f"\n👤 {app['username']}" if app["username"] else ""
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📋 Заявка №{app['id']} ({app['status']}){issued_note}\n{app['nickname']}",
+        text=f"📋 Заявка №{app['id']} ({app['status']}){issued_note}{username_line}\n{app['nickname']}",
     )
 
     photo_paths = [
@@ -276,7 +277,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [
             InlineKeyboardButton(
-                f"№{app['id']} — {app['nickname']} ({app['status']})",
+                f"№{app['id']} — {app['nickname']} — {app['username'] or 'без юзернейма'} ({app['status']})",
                 callback_data=f"view_{app['id']}",
             )
         ]
@@ -296,9 +297,15 @@ async def blocklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Заблокированных пользователей нет.", reply_markup=ADMIN_MENU_MARKUP
         )
         return
-    lines = "\n".join(f"• {uid}" for uid in blocked)
+    lines = []
+    for user_id, username in blocked:
+        if username:
+            lines.append(f"• {username} (id {user_id})")
+        else:
+            lines.append(f"• id {user_id}")
     await update.message.reply_text(
-        f"🚫 Заблокированные пользователи:\n{lines}", reply_markup=ADMIN_MENU_MARKUP
+        "🚫 Заблокированные пользователи:\n" + "\n".join(lines),
+        reply_markup=ADMIN_MENU_MARKUP,
     )
 
 
@@ -315,9 +322,11 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("user_id должен быть числом.")
         return
-    db.block_user_db(target_id)
+    username = db.get_username_for_user(target_id)
+    db.block_user_db(target_id, username)
+    who = f"{username} (id {target_id})" if username else f"id {target_id}"
     await update.message.reply_text(
-        f"🚫 Пользователь {target_id} заблокирован.", reply_markup=ADMIN_MENU_MARKUP
+        f"🚫 Пользователь {who} заблокирован.", reply_markup=ADMIN_MENU_MARKUP
     )
 
 
@@ -439,8 +448,10 @@ async def block_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     target_user_id = int(query.data.split("_")[1])
-    db.block_user_db(target_user_id)
-    await query.edit_message_text(f"🚫 Пользователь {target_user_id} заблокирован.")
+    username = db.get_username_for_user(target_user_id)
+    db.block_user_db(target_user_id, username)
+    who = f"{username} (id {target_user_id})" if username else f"id {target_user_id}"
+    await query.edit_message_text(f"🚫 Пользователь {who} заблокирован.")
 
 
 def main():
