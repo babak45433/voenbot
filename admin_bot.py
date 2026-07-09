@@ -109,8 +109,12 @@ async def notify_user(user_id: int, text: str):
 
 async def send_application_card(chat_id: int, context: ContextTypes.DEFAULT_TYPE, app):
     """Отправляет никнейм + скрины кучкой (media group) + кнопки действий."""
+    issued_note = ""
+    if app["status"] == "approved":
+        issued_note = "\n🎖 Военник выдан" if app["issued"] else "\n⬜ Военник ещё не выдан"
     await context.bot.send_message(
-        chat_id=chat_id, text=f"📋 Заявка №{app['id']} ({app['status']})\n{app['nickname']}"
+        chat_id=chat_id,
+        text=f"📋 Заявка №{app['id']} ({app['status']}){issued_note}\n{app['nickname']}",
     )
 
     photo_paths = [
@@ -139,6 +143,24 @@ async def send_application_card(chat_id: int, context: ContextTypes.DEFAULT_TYPE
                 [
                     InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{app['id']}"),
                     InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{app['id']}"),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🚫 Заблокировать пользователя",
+                        callback_data=f"blockuser_{app['user_id']}",
+                    )
+                ],
+            ]
+        )
+    elif app["status"] == "approved":
+        issue_label = "↩️ Отменить выдачу" if app["issued"] else "🎖 Отметить выданным"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(issue_label, callback_data=f"issue_{app['id']}")],
+                [
+                    InlineKeyboardButton(
+                        "🗑 Удалить окончательно", callback_data=f"delete_{app['id']}"
+                    )
                 ],
                 [
                     InlineKeyboardButton(
@@ -190,26 +212,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def build_status_list(status: str, title: str):
+    """Возвращает (текст, InlineKeyboardMarkup|None) для списка заявок по статусу.
+    Для approved добавляет кнопку 'Выдано' и зелёную галочку у уже выданных."""
+    applications = db.get_applications_by_status(status)
+    if not applications:
+        return f"{title}: пусто.", None
+
+    buttons = []
+    for app in applications:
+        label = f"№{app['id']} — {app['nickname']}"
+        if status == "approved" and app["issued"]:
+            label = "✅ " + label
+        row = [InlineKeyboardButton(label, callback_data=f"view_{app['id']}")]
+        if status == "approved":
+            issue_label = "↩️ Отменить выдачу" if app["issued"] else "🎖 Выдано"
+            row.append(InlineKeyboardButton(issue_label, callback_data=f"issue_{app['id']}"))
+        buttons.append(row)
+
+    return f"{title}: {len(applications)}", InlineKeyboardMarkup(buttons)
+
+
 async def _send_status_list(update: Update, status: str, title: str):
     if not is_admin(update.effective_user.id):
         return
-    applications = db.get_applications_by_status(status)
-    if not applications:
-        await update.message.reply_text(f"{title}: пусто.", reply_markup=ADMIN_MENU_MARKUP)
+    text, markup = build_status_list(status, title)
+    if markup is None:
+        await update.message.reply_text(text, reply_markup=ADMIN_MENU_MARKUP)
         return
-    buttons = [
-        [
-            InlineKeyboardButton(
-                f"Заявка №{app['id']} — {app['nickname']}",
-                callback_data=f"view_{app['id']}",
-            )
-        ]
-        for app in applications
-    ]
-    await update.message.reply_text(
-        f"{title}: {len(applications)}",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 async def voennik_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -384,6 +415,23 @@ async def delete_application_callback(update: Update, context: ContextTypes.DEFA
     await query.edit_message_text(f"🗑 Заявка №{app_id} удалена окончательно.")
 
 
+async def issue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        return
+
+    app_id = int(query.data.split("_")[1])
+    db.toggle_issued(app_id)
+
+    # Перерисовываем список одобренных заявок прямо в этом же сообщении
+    text, markup = build_status_list("approved", "Одобренные заявки")
+    if markup is None:
+        await query.edit_message_text(text)
+    else:
+        await query.edit_message_text(text, reply_markup=markup)
+
+
 async def block_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -410,6 +458,7 @@ def main():
     application.add_handler(CallbackQueryHandler(view_application, pattern="^view_"))
     application.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_callback, pattern="^reject_"))
+    application.add_handler(CallbackQueryHandler(issue_callback, pattern="^issue_"))
     application.add_handler(CallbackQueryHandler(delete_application_callback, pattern="^delete_"))
     application.add_handler(CallbackQueryHandler(block_user_callback, pattern="^blockuser_"))
 
