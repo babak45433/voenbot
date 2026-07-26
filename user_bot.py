@@ -475,11 +475,13 @@ async def notify_admin_bot(app_id: int):
         ]
     )
 
+    username_line = f"\n👤 {app['username']}" if app["username"] else ""
+
     admin_bot = Bot(token=ADMIN_BOT_TOKEN)
     for admin_id in ADMIN_IDS:
         try:
             await admin_bot.send_message(
-                chat_id=admin_id, text=f"📋 Заявка №{app_id}\n{app['nickname']}"
+                chat_id=admin_id, text=f"📋 Заявка №{app_id}{username_line}\n{app['nickname']}"
             )
             media = []
             opened_files = []
