@@ -45,6 +45,7 @@ def init_db():
             license_screenshot TEXT,
             status TEXT DEFAULT 'pending',
             issued INTEGER DEFAULT 0,
+            reject_reason TEXT,
             created_at TEXT
         )
         """
@@ -54,13 +55,24 @@ def init_db():
         cur.execute("ALTER TABLE applications ADD COLUMN issued INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # колонка уже существует
+    # Миграция для БД, созданных до появления поля reject_reason
+    try:
+        cur.execute("ALTER TABLE applications ADD COLUMN reject_reason TEXT")
+    except sqlite3.OperationalError:
+        pass  # колонка уже существует
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS blocked_users (
-            user_id INTEGER PRIMARY KEY
+            user_id INTEGER PRIMARY KEY,
+            username TEXT
         )
         """
     )
+    # Миграция для БД, созданных до появления поля username
+    try:
+        cur.execute("ALTER TABLE blocked_users ADD COLUMN username TEXT")
+    except sqlite3.OperationalError:
+        pass  # колонка уже существует
     conn.commit()
     conn.close()
 
@@ -74,11 +86,20 @@ def is_blocked(user_id: int) -> bool:
     return row is not None
 
 
-def block_user_db(user_id: int):
+def block_user_db(user_id: int, username: str = None):
     conn = db_connect()
-    conn.execute(
-        "INSERT OR IGNORE INTO blocked_users (user_id) VALUES (?)", (user_id,)
-    )
+    if username:
+        conn.execute(
+            """
+            INSERT INTO blocked_users (user_id, username) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
+            """,
+            (user_id, username),
+        )
+    else:
+        conn.execute(
+            "INSERT OR IGNORE INTO blocked_users (user_id) VALUES (?)", (user_id,)
+        )
     conn.commit()
     conn.close()
 
@@ -91,12 +112,24 @@ def unblock_user_db(user_id: int):
 
 
 def get_blocked_users():
+    """Возвращает список (user_id, username|None), отсортированный по user_id."""
     conn = db_connect()
     rows = conn.execute(
-        "SELECT user_id FROM blocked_users ORDER BY user_id ASC"
+        "SELECT user_id, username FROM blocked_users ORDER BY user_id ASC"
     ).fetchall()
     conn.close()
-    return [row["user_id"] for row in rows]
+    return [(row["user_id"], row["username"]) for row in rows]
+
+
+def get_username_for_user(user_id: int):
+    """Ищет последний известный username/никнейм этого user_id по его заявкам."""
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT username FROM applications WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row["username"] if row else None
 
 
 def get_cooldown_remaining(user_id: int):
@@ -182,8 +215,14 @@ def approve_application(app_id: int):
     set_application_status(app_id, "approved")
 
 
-def reject_application(app_id: int):
-    set_application_status(app_id, "rejected")
+def reject_application(app_id: int, reason: str = None):
+    conn = db_connect()
+    conn.execute(
+        "UPDATE applications SET status = 'rejected', reject_reason = ? WHERE id = ?",
+        (reason, app_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def toggle_issued(app_id: int) -> bool:
