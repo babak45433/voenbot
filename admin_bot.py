@@ -12,7 +12,9 @@
 - /blocklist — список заблокированных пользователей.
 - Просмотр заявки: никнейм + все скрины одной кучкой.
 - Кнопки "Одобрить" / "Отклонить" — меняют статус и уведомляют пользователя
-  (через BOT_TOKEN — токен пользовательского бота).
+  (через BOT_TOKEN — токен пользовательского бота). При отклонении бот
+  сначала просит админа написать причину следующим сообщением, и только
+  после этого шлёт пользователю "Отклонено" + причину.
 - Кнопка "Заблокировать пользователя" — блокирует автора заявки.
 - /block <user_id> и /unblock <user_id> — ручная блокировка по ID.
 
@@ -38,6 +40,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 import db
@@ -112,10 +116,13 @@ async def send_application_card(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     issued_note = ""
     if app["status"] == "approved":
         issued_note = "\n🎖 Военник выдан" if app["issued"] else "\n⬜ Военник ещё не выдан"
+    reason_note = ""
+    if app["status"] == "rejected" and app["reject_reason"]:
+        reason_note = f"\n📝 Причина: {app['reject_reason']}"
     username_line = f"\n👤 {app['username']}" if app["username"] else ""
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📋 Заявка №{app['id']} ({app['status']}){issued_note}{username_line}\n{app['nickname']}",
+        text=f"📋 Заявка №{app['id']} ({app['status']}){issued_note}{reason_note}{username_line}\n{app['nickname']}",
     )
 
     photo_paths = [
@@ -393,6 +400,7 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Не отклоняет сразу — просит админа написать причину следующим сообщением."""
     query = update.callback_query
     await query.answer()
     if not is_admin(update.effective_user.id):
@@ -404,12 +412,46 @@ async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Заявка не найдена.")
         return
 
-    db.reject_application(app_id)
-    await query.edit_message_text(f"❌ Заявка №{app_id} отклонена.")
+    context.user_data["awaiting_reject_reason"] = app_id
+    await query.edit_message_text(
+        f"✍️ Напишите причину отклонения заявки №{app_id} следующим сообщением "
+        f"(её увидит пользователь)."
+    )
+
+
+async def reject_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ловит текстовое сообщение с причиной отклонения, если админ только что
+    нажал '❌ Отклонить'. Если ничего не ожидается — просто ничего не делает
+    (не мешает другим текстовым сообщениям, если такие появятся в будущем)."""
+    if not is_admin(update.effective_user.id):
+        return
+    app_id = context.user_data.get("awaiting_reject_reason")
+    if not app_id:
+        return
+
+    reason = (update.message.text or "").strip()
+    if not reason:
+        await update.message.reply_text("Причина не может быть пустой. Напишите текст причины.")
+        return
+
+    context.user_data.pop("awaiting_reject_reason", None)
+    app = db.get_application(app_id)
+    if not app:
+        await update.message.reply_text(
+            "Заявка не найдена (возможно, уже удалена).", reply_markup=ADMIN_MENU_MARKUP
+        )
+        return
+
+    db.reject_application(app_id, reason)
+    await update.message.reply_text(
+        f"❌ Заявка №{app_id} отклонена. Причина отправлена пользователю.",
+        reply_markup=ADMIN_MENU_MARKUP,
+    )
     await notify_user(
         app["user_id"],
-        f"❌ Ваша заявка №{app_id} отклонена. Проверьте правильность скринов и "
-        f"попробуйте подать заявку заново через /start.",
+        f"❌ Ваша заявка №{app_id} отклонена.\n"
+        f"📝 Причина: {reason}\n\n"
+        f"Попробуйте подать заявку заново через /start, устранив указанную причину.",
     )
 
 
@@ -472,6 +514,9 @@ def main():
     application.add_handler(CallbackQueryHandler(issue_callback, pattern="^issue_"))
     application.add_handler(CallbackQueryHandler(delete_application_callback, pattern="^delete_"))
     application.add_handler(CallbackQueryHandler(block_user_callback, pattern="^blockuser_"))
+    # Общий текстовый хендлер — ловит причину отклонения, если она ожидается.
+    # Команды (сообщения с "/") сюда не попадают благодаря ~filters.COMMAND.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reject_reason_handler))
 
     logger.info("Админ-бот запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
